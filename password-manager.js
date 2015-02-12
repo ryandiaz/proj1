@@ -99,7 +99,7 @@ var keychain = function() {
     * Return Type: boolean
     */
   keychain.load = function(password, repr, trusted_data_check) {
-    //R the secrets will contain the encrypted key-value store 
+    //R repr will contain the encrypted key-value store 
     var load_key = KDF(password, salt);
     //R take load_key to verify the password is correct
     //R check if the password is correct if not return false
@@ -130,7 +130,6 @@ var keychain = function() {
     var keychain_str = JSON.stringify(keychain)
     var checksum = SHA256(string_to_bitarray(keychain_str)) //R SHA256 takes in bit array
    
-    //R throw "Not implemented";
     return [keychain_str, checksum]
   }
 
