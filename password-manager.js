@@ -38,7 +38,10 @@ var KDF = lib.KDF,
 var keychain = function() {
   // Class-private instance variables.
   var priv = {
-    secrets: {/* Your secrets here */ }, //R to store serialized version of encrypted key value store
+    secrets: { 
+      var key_gcm = null; //R for encryption decryption
+      var key_HMAC = null; //R for HMAC signatures
+    }, //R to store serialized version of encrypted key value store
     data: { /* Non-secret data here */ } //R store the SHA 256 checksum? Apparently not since the 
   };
 
@@ -53,8 +56,7 @@ var keychain = function() {
   //R START RYAN ADDED VARS
   //R salt public for now. does the salt need to be private or change?
   var salt = null;
-  var key_gcm = null; //R for encryption decryption
-  var key_HMAC = null; //R for HMAC signatures
+  //R can't store either of these
   //R END
 
   var keychain = {}; //R SO This is the apparent store for the key-values 
@@ -72,8 +74,8 @@ var keychain = function() {
     var init_salt = random_bitarray(256);
     var init_key = KDF(password, init_salt);//R how can we generate separate encryption and HMAC keys with one KDF call?
     //R for now they are the same but I think this should change
-    key_gcm = init_key;
-    key_HMAC = init_key;
+    priv.secrets.key_gcm = init_key;
+    priv.secrets.key_HMAC = HMAC(init_key, password);
     salt = init_salt;
     ready = true;
     priv.data.version = "CS 255 Password Manager v1.0";
@@ -101,14 +103,20 @@ var keychain = function() {
   keychain.load = function(password, repr, trusted_data_check) {
     //R repr will contain the encrypted key-value store 
     var load_key = KDF(password, salt);
+    //R check if the passwords match
+    var hmac_key = HMAC(load_key, password);
+    var cipher_sk = setup_cipher(hmac_key);
+    var pass_check = enc_gcm(cipher_sk, load_key);
+    repr_obj = JSON.parse(repr);
+    if (!bitarray_equal(pass_check,repr_obj.pass_check)) return false;
     //R take load_key to verify the password is correct
     //R check if the password is correct if not return false
     if (!bitarray_equal(trusted_data_check, SHA256(string_to_bitarray(repr)))) throw "integrity check fails!";
     //R trusted_data_check should equal the checksum value in the repsentation, if not throw exception
-    keychain = JSON.parse(repr);
-    
+    salt = repr_obj.salt;
+    keychain = repr_obj.keychain;
+    ready = true;
     return true;
-
   };
 
   /**
@@ -127,9 +135,14 @@ var keychain = function() {
   keychain.dump = function() {
     //R tentatively implemented
     if (!ready) return null
-    var keychain_str = JSON.stringify(keychain)
+    var cipher_sk = setup_cipher(priv.secrets.key_HMAC);
+    var pass_check = enc_gcm(cipher_sk, priv.secrets.key_gcm);
+    var repr_obj = {};
+    repr_obj.keychain = keychain;
+    keychain.pass_check = pass_check;
+    keychain.salt = salt;
+    var keychain_str = JSON.stringify(repr_obj)
     var checksum = SHA256(string_to_bitarray(keychain_str)) //R SHA256 takes in bit array
-   
     return [keychain_str, checksum]
   }
 
@@ -168,8 +181,9 @@ var keychain = function() {
   */
   keychain.set = function(name, value) {
     //R signature for name and encrypted value are put in keychain
-    var pad_lenth = MAX_PW_LEN_BYTES - value.length + 1;
-    var chr_pad = String.fromCharCode(pad_length);
+    // var pad_lenth = MAX_PW_LEN_BYTES - value.length + 1;
+    // var chr_pad = String.fromCharCode(pad_length);
+    var padded_value = string_from_padded_bitarray(value, MAX_PW_LEN_BYTES);
     if (!ready) throw "Keychain not initialized.";
     if (pad_length < 1) throw "Password max length exceeded";
     value = value + Array(pad_length+1).join(chr_pad) //R pad makes value 65 bytes long, at decrypt look at char val and remove that many from end
