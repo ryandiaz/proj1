@@ -73,6 +73,7 @@ var keychain = function() {
     //R for now they are the same but I think this should change
     priv.secrets.key_HMAC = init_key;
     priv.secrets.key_gcm = bitarray_slice(HMAC(init_key, password), 0, 128);
+    priv.secrets.counter = 0;
     salt = init_salt;
     ready = true;
     priv.data.version = "CS 255 Password Manager v1.0";
@@ -99,19 +100,31 @@ var keychain = function() {
     */
   keychain.load = function(password, repr, trusted_data_check) {
     //R repr will contain the encrypted key-value store 
-    var repr_obj = JSON.parse(repr);
-    //R take load_key to verify the password is correct
-    //R check if the password is correct if not return false
-    if (!bitarray_equal(trusted_data_check, SHA256(string_to_bitarray(repr)))) throw "integrity check fails!";
-    //R trusted_data_check should equal the checksum value in the repsentation, if not throw exception
-    salt = repr_obj.salt;
-    keychain = repr_obj.keychain;
+    var obj = JSON.parse(repr);
+    var encrypted_keychain = obj.keychain_str;
+    salt = obj.salt;
     var load_key = KDF(password, salt);
     //R check if the passwords match
     var key = bitarray_slice(HMAC(load_key, password), 0, 128);
-    var decrypted = dec_gcm(setup_cipher(key), repr_obj.pass_check);
+    // console.log(encrypted_keychain)
+    var keychain_str = dec_gcm(setup_cipher(key), encrypted_keychain);
+    var keychain_obj = JSON.parse(bitarray_to_string(keychain_str));
+    //R take load_key to verify the password is correct
+    //R check if the password is correct if not return false
+    if (!bitarray_equal(keychain_obj.counter_hmac, HMAC(load_key, string_to_bitarray(trusted_data_check+'')))) throw "integrity check fails!";
+    // if (!bitarray_equal(trusted_data_check, SHA256(string_to_bitarray(repr)))) throw "integrity check fails!";
+    //R trusted_data_check should equal the checksum value in the repsentation, if not throw exception
+    // salt = repr_obj.salt;
+    keychain = keychain_obj.keychain;
+    // var load_key = KDF(password, salt);
+    //R check if the passwords match
+    // var key = bitarray_slice(HMAC(load_key, password), 0, 128);
+    var decrypted = dec_gcm(setup_cipher(key), keychain_obj.pass_check);
     priv.secrets.key_HMAC = load_key;
     priv.secrets.key_gcm = key;
+    priv.secrets.counter = trusted_data_check;
+    console.log('load')
+    console.log(priv.secrets.counter)
     if (!bitarray_equal(key,decrypted)) return false;
     ready = true;
     return true;
@@ -138,10 +151,19 @@ var keychain = function() {
     var repr_obj = {};
     repr_obj.keychain = keychain;
     repr_obj.pass_check = pass_check;
-    repr_obj.salt = salt;
+    priv.secrets.counter = priv.secrets.counter+1;
+    repr_obj.counter_hmac = HMAC(priv.secrets.key_HMAC, string_to_bitarray(priv.secrets.counter+''));
     var keychain_str = JSON.stringify(repr_obj);
-    var checksum = SHA256(string_to_bitarray(keychain_str)); //R SHA256 takes in bit array
-    return [keychain_str, checksum];
+    var encrypted_keychain = enc_gcm(cipher_sk, string_to_bitarray(keychain_str));
+    var obj = {};
+    // console.log(encrypted_keychain)
+    obj.keychain_str = encrypted_keychain;
+    obj.salt = salt;
+    var repr = JSON.stringify(obj)
+    // var checksum = SHA256(string_to_bitarray(keychain_str)); //R SHA256 takes in bit array
+    console.log('dump')
+    console.log(priv.secrets.counter)
+    return [repr, priv.secrets.counter];
   }
 
   /**
@@ -194,8 +216,6 @@ var keychain = function() {
     var domain_sig = bitarray_to_hex(domain_bits);
 
     var pass_enc = enc_gcm(setup_cipher(priv.secrets.key_gcm), bitarray_concat(padded_value, domain_bits));
-    console.log(padded_value.length)
-    console.log(bitarray_concat(padded_value, domain_bits).length)
     keychain[domain_sig] = pass_enc;
  
   }
