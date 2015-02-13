@@ -38,10 +38,7 @@ var KDF = lib.KDF,
 var keychain = function() {
   // Class-private instance variables.
   var priv = {
-    secrets: { 
-      var key_gcm = null; //R for encryption decryption
-      var key_HMAC = null; //R for HMAC signatures
-    }, //R to store serialized version of encrypted key value store
+    secrets: { /* secret data here */ }, //R to store serialized version of encrypted key value store
     data: { /* Non-secret data here */ } //R store the SHA 256 checksum? Apparently not since the 
   };
 
@@ -74,8 +71,8 @@ var keychain = function() {
     var init_salt = random_bitarray(256);
     var init_key = KDF(password, init_salt);//R how can we generate separate encryption and HMAC keys with one KDF call?
     //R for now they are the same but I think this should change
-    priv.secrets.key_gcm = init_key;
-    priv.secrets.key_HMAC = HMAC(init_key, password);
+    priv.secrets.key_HMAC = init_key;
+    priv.secrets.key_gcm = bitarray_slice(HMAC(init_key, password), 0, 128);
     salt = init_salt;
     ready = true;
     priv.data.version = "CS 255 Password Manager v1.0";
@@ -102,19 +99,20 @@ var keychain = function() {
     */
   keychain.load = function(password, repr, trusted_data_check) {
     //R repr will contain the encrypted key-value store 
-    var load_key = KDF(password, salt);
-    //R check if the passwords match
-    var hmac_key = HMAC(load_key, password);
-    var cipher_sk = setup_cipher(hmac_key);
-    var pass_check = enc_gcm(cipher_sk, load_key);
-    repr_obj = JSON.parse(repr);
-    if (!bitarray_equal(pass_check,repr_obj.pass_check)) return false;
+    var repr_obj = JSON.parse(repr);
     //R take load_key to verify the password is correct
     //R check if the password is correct if not return false
     if (!bitarray_equal(trusted_data_check, SHA256(string_to_bitarray(repr)))) throw "integrity check fails!";
     //R trusted_data_check should equal the checksum value in the repsentation, if not throw exception
     salt = repr_obj.salt;
     keychain = repr_obj.keychain;
+    var load_key = KDF(password, salt);
+    //R check if the passwords match
+    var key = bitarray_slice(HMAC(load_key, password), 0, 128);
+    var decrypted = dec_gcm(setup_cipher(key), repr_obj.pass_check);
+    priv.secrets.key_HMAC = load_key;
+    priv.secrets.key_gcm = key;
+    if (!bitarray_equal(key,decrypted)) return false;
     ready = true;
     return true;
   };
@@ -134,16 +132,16 @@ var keychain = function() {
     */ 
   keychain.dump = function() {
     //R tentatively implemented
-    if (!ready) return null
-    var cipher_sk = setup_cipher(priv.secrets.key_HMAC);
+    if (!ready) return null;
+    var cipher_sk = setup_cipher(priv.secrets.key_gcm);
     var pass_check = enc_gcm(cipher_sk, priv.secrets.key_gcm);
     var repr_obj = {};
     repr_obj.keychain = keychain;
-    keychain.pass_check = pass_check;
-    keychain.salt = salt;
-    var keychain_str = JSON.stringify(repr_obj)
-    var checksum = SHA256(string_to_bitarray(keychain_str)) //R SHA256 takes in bit array
-    return [keychain_str, checksum]
+    repr_obj.pass_check = pass_check;
+    repr_obj.salt = salt;
+    var keychain_str = JSON.stringify(repr_obj);
+    var checksum = SHA256(string_to_bitarray(keychain_str)); //R SHA256 takes in bit array
+    return [keychain_str, checksum];
   }
 
   /**
@@ -157,15 +155,22 @@ var keychain = function() {
     * Return Type: string
     */
   keychain.get = function(name) {
-    var result, pad_len, pass_padded;
-    if (!ready) throw "Keychain not initialized.";
     //R how to check checksum?
     //R could strignify keychain, run HMAC and check if equal to value stored in priv
-    result = keychain[HMAC(key_HMAC, name)];
-    if (result === undefined) return null;
-    pass_padded = dec_gcm(setup_cipher(key_gcm),result);
-    pad_len = pass_padded.slice(-1); //R should we need to check every pad byte? look at lecture to double check
-    return pass_padded.substring(0,MAX_PW_LEN_BYTES - pad_len);
+    // var result, pad_len, pass_padded;
+    if (!ready) throw "Keychain not initialized.";
+    var domain_bits = HMAC(priv.secrets.key_HMAC, name);
+    var domain_sig = bitarray_to_hex(domain_bits);
+    if (!(domain_sig in keychain)) return null;
+    var result = keychain[domain_sig];
+    var decrypted = dec_gcm(setup_cipher(priv.secrets.key_gcm), result);
+    // console.log(decrypted)
+    // console.log(decrypted.length)
+    var pass_padded = bitarray_slice(decrypted, 0, bitarray_len(decrypted)-256);
+    var domain_bits_val = bitarray_slice(decrypted, bitarray_len(decrypted)-256, bitarray_len(decrypted));
+    if (!bitarray_equal(domain_bits, domain_bits_val)) throw "It's a swap! Mission aborted!";
+    var pass = string_from_padded_bitarray(pass_padded, MAX_PW_LEN_BYTES);
+    return pass;
   }
 
   /** 
@@ -181,14 +186,16 @@ var keychain = function() {
   */
   keychain.set = function(name, value) {
     //R signature for name and encrypted value are put in keychain
-    // var pad_lenth = MAX_PW_LEN_BYTES - value.length + 1;
-    // var chr_pad = String.fromCharCode(pad_length);
-    var padded_value = string_from_padded_bitarray(value, MAX_PW_LEN_BYTES);
     if (!ready) throw "Keychain not initialized.";
-    if (pad_length < 1) throw "Password max length exceeded";
-    value = value + Array(pad_length+1).join(chr_pad) //R pad makes value 65 bytes long, at decrypt look at char val and remove that many from end
-    var domain_sig = HMAC(key_HMAC, name);
-    var pass_enc = enc_gcm(setup_cipher(key_gcm), value);
+    if (value.length > MAX_PW_LEN_BYTES) throw "Password max length exceeded";
+    var padded_value = string_to_padded_bitarray(value, MAX_PW_LEN_BYTES);
+    // value = value + Array(pad_length+1).join(chr_pad) //R pad makes value 65 bytes long, at decrypt look at char val and remove that many from end
+    var domain_bits = HMAC(priv.secrets.key_HMAC, name);
+    var domain_sig = bitarray_to_hex(domain_bits);
+
+    var pass_enc = enc_gcm(setup_cipher(priv.secrets.key_gcm), bitarray_concat(padded_value, domain_bits));
+    console.log(padded_value.length)
+    console.log(bitarray_concat(padded_value, domain_bits).length)
     keychain[domain_sig] = pass_enc;
  
   }
@@ -203,7 +210,11 @@ var keychain = function() {
     * Return Type: boolean
   */
   keychain.remove = function(name) {
-    throw "Not implemented!";
+    if (!ready) throw "Keychain not initialized.";
+    var domain_sig = bitarray_to_hex(HMAC(priv.secrets.key_HMAC, name));
+    if (!(domain_sig in keychain)) return false;
+    delete keychain[domain_sig];
+    return true;
   }
 
   return keychain;
